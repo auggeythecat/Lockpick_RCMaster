@@ -29,7 +29,7 @@ jobs:
           apt-get update
           apt-get install -y build-essential git zip
 
-      - name: Compute next tag
+      - name: Compute release tag from Versions.inc
         id: version
         shell: bash
         run: |
@@ -37,39 +37,41 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git fetch --tags --force
 
+          # The embedded build version (shown in-app) is the single source of truth,
+          # so the release tag is derived from it to keep tag and binary in sync.
           major="$(sed -n 's/^LPVERSION_MAJOR := *\([0-9]\+\).*$/\1/p' Versions.inc | head -n1)"
           minor="$(sed -n 's/^LPVERSION_MINOR := *\([0-9]\+\).*$/\1/p' Versions.inc | head -n1)"
-          if [[ -z "${major}" || -z "${minor}" ]]; then
+          bugfx="$(sed -n 's/^LPVERSION_BUGFX := *\([0-9]\+\).*$/\1/p' Versions.inc | head -n1)"
+          if [[ -z "${major}" || -z "${minor}" || -z "${bugfx}" ]]; then
             echo "Failed to parse Versions.inc" >&2
             exit 1
           fi
 
-          # If repo already uses v-prefixed tags, keep that style.
-          if git tag --list "v${major}.${minor}.*" | head -n1 >/dev/null; then
-            prefix="v${major}.${minor}."
+          # Preserve the repository's existing tag style (v-prefixed if any v* tag exists).
+          if [[ -n "$(git tag --list 'v*')" ]]; then
+            prefix="v"
           else
-            prefix="${major}.${minor}."
+            prefix=""
           fi
 
-          last_tag="$(git tag --list "${prefix}*" --sort=-v:refname | head -n1)"
-          if [[ -z "${last_tag}" ]]; then
-            next_patch="0"
-          else
-            last_patch="$(echo "${last_tag}" | sed -E 's/^v?'"${major//./\\.}"'\\.'"${minor//./\\.}"'\\.([0-9]+)$/\\1/' )"
-            if [[ -z "${last_patch}" || "${last_patch}" == "${last_tag}" ]]; then
-              last_patch="$(echo "${last_tag}" | awk -F. '{print $3}')"
-            fi
-            next_patch="$(( last_patch + 1 ))"
-          fi
-
-          tag="${prefix}${next_patch}"
+          tag="${prefix}${major}.${minor}.${bugfx}"
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
-          echo "Computed tag: ${tag}"
+
+          # Skip releasing when this version was already tagged (bump Versions.inc to cut a new release).
+          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Tag ${tag} already exists; release steps will be skipped."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Computed new tag: ${tag}"
+          fi
 
       - name: Build the project
+        if: steps.version.outputs.exists == 'false'
         run: make
 
       - name: Create ZIP package
+        if: steps.version.outputs.exists == 'false'
         run: |
           version="${{ steps.version.outputs.tag }}"
           cd output
@@ -77,6 +79,7 @@ jobs:
           cd ..
 
       - name: Create and push tag
+        if: steps.version.outputs.exists == 'false'
         shell: bash
         run: |
           set -euo pipefail
@@ -91,6 +94,7 @@ jobs:
           fi
 
       - name: Get latest commit message
+        if: steps.version.outputs.exists == 'false'
         id: changelog
         run: |
           message=$(git log -1 --pretty=%B)
@@ -99,6 +103,7 @@ jobs:
           echo "EOF" >> $GITHUB_OUTPUT
 
       - name: Create GitHub Release
+        if: steps.version.outputs.exists == 'false'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.tag }}
@@ -115,6 +120,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload compiled ZIP as artifact
+        if: steps.version.outputs.exists == 'false'
         uses: actions/upload-artifact@v4
         with:
           name: Lockpick_RCM-${{ steps.version.outputs.tag }}.zip
